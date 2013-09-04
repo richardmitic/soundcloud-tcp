@@ -4,7 +4,7 @@
 Current version: 0.1.1
 
 ###Usage
-All code is tested using Python 2.7.3. It will *not* run in Python 3.
+All code is tested using Python 2.7.3 on Mac OS X 10.6. It will *not* run in Python 3.
 To run the server:
 
 	python server.py
