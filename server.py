@@ -14,14 +14,7 @@ VERBOSE = True
 
 
 """
-TODO:	DONE Move thread activation to separate function
-		DONE Add global timeout when there is no activity
-		DONE Find proper way to stop threads
-		DONE Make connections with IP4 and IP6
-		DONE Set max queue length
-		DONE Add test mode that will close server when any connection is terminated remotely
-		DONE Think about raising a ValueError is timeout is out of range
-		DONE Timeouts on waiting for users to connect
+TODO:	Shutdown mechanism is messy. Consider a thread that constantly polls a flag which may be set byt any other thread. Could be combined with the timeout thread.
 """
 
 
@@ -94,6 +87,7 @@ class TCP_server():
 	TCP server to process incoming events and generate notifcations for connected clients.
 	
 	Keyword arguments:
+	tcp_buffer_size -- Max number of bytes that will be accepted by the TCP socket in 1 go.
 	timeout -- If timeout is not None, the server will shut down after a period of no activity that lasts for the given time in seconds. (default None)
 	test_mode -- If test_mode is True, the server will shut down when any connection is terminated remotely. Designed for use with FollowerMaze-assembly-1.0.jar. (default False) 
 	maxqueue -- Maximum number of messages allowed in the queue.
@@ -105,7 +99,6 @@ class TCP_server():
 		
 		self.clients = []
 		self.event_buffer = ''
-		self.shutdown = False
 
 		self.host = host
 		self.event_source_port = event_source_port
@@ -119,6 +112,7 @@ class TCP_server():
 		self.client_list_lock = threading.Lock()
 		self.event_buffer_lock = threading.Lock()
 		self.stop = threading.Event()
+		self.shutdown = threading.Event()
 		
 		if timeout: self.TO = Server_timeout(self)
 		self.UC = User_client_handler(self)
@@ -139,25 +133,30 @@ class TCP_server():
 		s = None
 		err = None
 		num_connection_attempts = 3
-		time_between_connection_attempts = self.timeout/(num_connection_attempts+1) if self.timeout else 5.
+		time_between_connection_attempts = self.timeout/(2*num_connection_attempts) if self.timeout else 5.
 		for attempts in xrange(1,1+num_connection_attempts):
-			for res in socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_STREAM, 0, socket.AI_PASSIVE):
-				family, socktype, proto, canonname, sockaddress = res
-				try:
-					s = socket.socket(family, socktype, proto)
-				except socket.error:
-					s = None
-					continue
-				try:
-					s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-					s.bind(sockaddress)
-					s.listen(1)
-				except socket.error as e:
-					err = e
-					s.close()
-					s = None
-					continue
-				break
+			try:
+				for res in socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_STREAM, 0, socket.AI_PASSIVE):
+					family, socktype, proto, canonname, sockaddress = res
+					try:
+						s = socket.socket(family, socktype, proto)
+					except socket.error:
+						s = None
+						continue
+					try:
+						s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+						s.bind(sockaddress)
+						s.listen(1)
+					except socket.error as e:
+						err = e
+						s.close()
+						s = None
+						continue
+					break
+			except socket.gaierror as e:
+				print str(e)
+				s = None
+				return s
 			if s is None:
 				print "ERROR: could not open socket {0} after {1} attempts".format(sockaddress, attempts)
 				print str(err)
@@ -177,10 +176,10 @@ class TCP_server():
 	
 	def stop_server(self):
 		"""
-		Tell all threads to close and break connections. Function is prevented from being called by more than one thread.
+		Tell all threads to close and break connections. Can only be called once during lifecyle. All subsequent calls will be ignored.
 		"""
-		if not self.shutdown:
-			self.shutdown = True
+		if not self.shutdown.is_set():
+			self.shutdown.set()
 			
 			# Close connections to clients
 			for c in self.clients:
@@ -199,17 +198,17 @@ class TCP_server():
 			print "\n::: TCP server stopped :::\n"
 			self.stop.set()
 
-	def add_client(self, c):
+	def add_client(self, ID, conn, addr):
 		"""
 		Add client to list or edit a currently existing one.
 		"""
 		try:
-			current = filter(lambda client: client.ID == c.ID, self.clients)[0]
-			current.conn = c.conn
-			current.addr = c.addr
+			current = filter(lambda client: client.ID == ID, self.clients)[0]
+			current.conn = conn
+			current.addr = addr
 			return current
 		except IndexError:
-			self.clients.append(c)
+			self.clients.append(Client(ID, conn, addr))
 			return self.clients[-1]
 
 	def reset_timer(self):
@@ -293,7 +292,7 @@ class User_client_handler(threading.Thread):
 						try:
 							client_id = int(data)
 							with self.server.client_list_lock:
-								self.server.add_client(Client(client_id, conn, addr))
+								self.server.add_client(client_id, conn, addr)
 							print "Client {0} connected on address: {1}".format(client_id, addr)
 						except ValueError:
 							print "Client {0} attempted to connect, but gave bad ID".format(data)
@@ -392,6 +391,7 @@ class Event_parser(threading.Thread):
 		self.server = server
 		self.queue = []
 		self.next_msg = 1
+		self.max_msg_length = 14 # '000|X|000|000\n'
 		self.stop = threading.Event()
 
 	def run(self):
@@ -445,6 +445,10 @@ class Event_parser(threading.Thread):
 					else:
 						self.server.event_buffer = ''
 					return complete_msgs.splitlines(True)
+			else:
+				# Assume that buffer has bad data, and remove it.
+				if len(self.server.event_buffer) > self.max_msg_length:
+					self.server.event_buffer = ''
 			return []
 
 	def process_event(self, msg):
@@ -484,7 +488,7 @@ class Event_parser(threading.Thread):
 				to_user.send(msg)
 				printout("Message {0} sent to client".format(msg.replace("\n", r"\n"), to_user_id))
 			except IndexError:
-				new = self.server.add_client(Client(to_user_id, None, None))
+				new = self.server.add_client(to_user_id, None, None)
 				new.add_follower(from_user_id)
 				printout("Message {0} dropped".format(msg.replace("\n", r"\n")))
 	

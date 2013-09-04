@@ -1,5 +1,5 @@
 import unittest
-from server import TCP_server, Client
+from server import TCP_server
 from time import time, sleep
 import os
 import threading
@@ -10,7 +10,7 @@ USER_CLIENT_PORT = 9099
 BUFFER_SIZE = 4096  # Max TCP message size
 TIMEOUT = 20.
 MAXQUEUE = 1000
-VERBOSE = True
+VERBOSE = False
 
 
 # @unittest.skip('skipped')
@@ -76,13 +76,13 @@ class GeneralNetworkConnection(unittest.TestCase):
 			ret = os.system(command)
 			self.assertEqual(ret, 0)
 			self.s.EP.next_msg = 1
+			sleep(10)
 	
-	@unittest.skip('skipped')	
 	def test_6a_get_connection(self):
 		# Test bad port number
 		c = self.s.get_connection(HOST, -1)
 		self.assertEqual(c, None)
-	@unittest.skip('skipped')	
+
 	def test_6b_get_connection(self):
 		# Test bad host name
 		c = self.s.get_connection('None', USER_CLIENT_PORT)
@@ -103,20 +103,19 @@ class ServerFunctions(unittest.TestCase):
 		self.s.stop_server()
 		sleep(2)
 		self.s = None
-	@unittest.skip('skipped')
+
 	def test_8_numerical_arguments(self):
 		self.assertRaises(ValueError, TCP_server, HOST, EVENT_SOURCE_PORT, USER_CLIENT_PORT, BUFFER_SIZE, timeout=-1)
 		self.assertRaises(ValueError, TCP_server, HOST, EVENT_SOURCE_PORT, USER_CLIENT_PORT, BUFFER_SIZE, maxqueue=0)
 		self.assertRaises(ValueError, TCP_server, HOST, EVENT_SOURCE_PORT, USER_CLIENT_PORT, 0)
 
-	@unittest.skip("Skip test 9 as it doesn't run in conjunction with test 10. Both pass indiviually.")
 	def test_9_thread_start_point(self):
 		# Starting server should introduce 4 new threads
 		num_after_init = threading.active_count()
 		self.s.start_server()
 		sleep(5)
 		self.assertEqual(threading.active_count()-num_after_init, 4)
-	@unittest.skip('skipped')
+
 	def test_10_stop_server(self):
 		# Check no exceptions are raised regardless of connection state
 		try:
@@ -130,9 +129,9 @@ class ServerFunctions(unittest.TestCase):
 		self.assertTrue(result)
 	
 	def test_11_add_client(self):
-		self.s.add_client(Client(0, None, None))
+		self.s.add_client(0, None, None)
 		self.assertEqual(len(self.s.clients), 1)
-		self.s.add_client(Client(0, None, None))
+		self.s.add_client(0, None, None)
 		self.assertEqual(len(self.s.clients), 1)
 		
 	def test_12_reset_timer(self):
@@ -176,7 +175,7 @@ class ExtractingDataFromEventBuffer(unittest.TestCase):
 	
 	def test_15_no_complete_messages(self):
 		# Check that long data is removed and short data is left
-		datas = ['xxxxxxxxxxxxxx', 'xxx']
+		datas = ['x'*(self.s.EP.max_msg_length+1), 'xxx']
 		expected_results = ['', 'xxx']
 		for i in range (2):
 			self.s.event_buffer = datas[i]
@@ -214,7 +213,7 @@ class ParsingOfIndividualMessages(unittest.TestCase):
 		self.assertEqual(self.s.clients[0].followers[0], 46)
 		
 		# U: remove follower
-		self.s.add_client(Client(68,None,None))
+		self.s.add_client(68,None,None)
 		self.s.EP.process_event(U)
 		self.assertFalse(46 in self.s.clients[1].followers)
 		
@@ -239,7 +238,7 @@ class ParsingOfIndividualMessages(unittest.TestCase):
 		self.s.EP.process_event(U)
 		
 		# B: Extra data in message. Check no exceptions are thrown
-		for i in range(2): self.s.add_client(Client(68,None,None))
+		for i in range(2): self.s.add_client(68,None,None)
 		self.s.EP.process_event(B)
 		
 		# P: to_user_id missing. Check no exceptions are thrown
@@ -302,7 +301,7 @@ class Clients(unittest.TestCase):
 		
 	def test_23_sending_fail(self):
 		# Add client, pack with fake data and 
-		self.s.add_client(Client(0,None,None))
+		self.s.add_client(0, None, None)
 		c = self.s.clients[0]
 		c.conn = 'connection'
 		c.addr = 'address'
