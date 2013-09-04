@@ -12,9 +12,8 @@ MAXQUEUE = 1000
 
 VERBOSE = True
 
-
 """
-TODO:	Shutdown mechanism is messy. Consider a thread that constantly polls a flag which may be set byt any other thread. Could be combined with the timeout thread.
+TODO:	Make certain functions and variables private. This will require extra testing functions to be written.
 """
 
 
@@ -48,7 +47,6 @@ class Client():
 		Close connection to this client
 		"""
 		try:
-			# self.conn.shutdown(socket.SHUT_RD)
 			self.conn.close()
 			self.conn = None
 		except: pass
@@ -91,8 +89,9 @@ class TCP_server():
 	timeout -- If timeout is not None, the server will shut down after a period of no activity that lasts for the given time in seconds. (default None)
 	test_mode -- If test_mode is True, the server will shut down when any connection is terminated remotely. Designed for use with FollowerMaze-assembly-1.0.jar. (default False) 
 	maxqueue -- Maximum number of messages allowed in the queue.
+	verbose -- If verbose is false, only major messages are printed to stdout. Others are dropped.
 	"""
-	def __init__(self, host, event_source_port, user_client_port, tcp_buffer_size=4096, timeout=None, test_mode=False, maxqueue=1000):
+	def __init__(self, host, event_source_port, user_client_port, tcp_buffer_size=4096, timeout=None, test_mode=False, maxqueue=1000, verbose=True):
 		# Sanity checks
 		if maxqueue < 1 or tcp_buffer_size < 1 or (timeout and timeout <= 0):
 			raise ValueError
@@ -107,23 +106,59 @@ class TCP_server():
 		self.timeout = timeout
 		self.test_mode = test_mode
 		self.maxqueue = maxqueue
+		self.verbose = verbose
 
-		if timeout: self.timeout_lock = threading.Lock()
+		self.timeout_lock = threading.Lock()
 		self.client_list_lock = threading.Lock()
 		self.event_buffer_lock = threading.Lock()
+		self.shutdown_request = threading.Event()
 		self.stop = threading.Event()
-		self.shutdown = threading.Event()
 		
-		if timeout: self.TO = Server_timeout(self)
+		self.TO = Server_timeout(self)
 		self.UC = User_client_handler(self)
 		self.EL = Event_listener(self)
 		self.EP = Event_parser(self)
 		
 		# Make threads deamonic so they will end when main thread ends
-		if timeout: self.TO.daemon = True
+		self.TO.daemon = True
 		self.UC.daemon = True
 		self.EL.daemon = True
 		self.EP.daemon = True
+
+	def start_server(self):
+		"""Start all server threads. Connections are opened inside threads."""
+		print "\n::: TCP server starting :::\n"
+		self.TO.start()
+		self.EL.start()
+		self.UC.start()
+		self.EP.start()	
+	
+	def stop_server(self):
+		"""Request shutdown from timeout thread."""
+		self.shutdown_request.set()	
+	
+	def shutdown(self):
+		"""
+		Tell all threads to close and break connections. Can only be called once during lifecyle. All subsequent calls will be ignored.
+		"""	
+		# Close connections to clients
+		for c in self.clients:
+			c.close_socket()
+				
+		# Stop threads. Connections are closed inside thread
+		threads_before_shutdown = threading.active_count()
+		threads_to_stop = 3
+		try: self.UC.stop.set()
+		except: threads_to_stop -= 1
+		try: self.EL.stop.set()
+		except: threads_to_stop -= 1
+		try: self.EP.stop.set()
+		except: threads_to_stop -= 1
+		
+		# Wait for threads to end
+		while threading.active_count() > threads_before_shutdown-threads_to_stop: pass
+		print "\n::: TCP server stopped :::\n"
+		self.stop.set()
 
 	def get_connection(self, host, port):
 		"""
@@ -166,38 +201,6 @@ class TCP_server():
 				break
 		return s
 
-	def start_server(self):
-		"""Start all server threads. Connections are opened inside threads."""
-		print "\n::: TCP server starting :::\n"
-		if self.timeout: self.TO.start()
-		self.EL.start()
-		self.UC.start()
-		self.EP.start()		
-	
-	def stop_server(self):
-		"""
-		Tell all threads to close and break connections. Can only be called once during lifecyle. All subsequent calls will be ignored.
-		"""
-		if not self.shutdown.is_set():
-			self.shutdown.set()
-			
-			# Close connections to clients
-			for c in self.clients:
-				c.close_socket()
-				
-			# Stop threads. Connections are closed inside thread
-			try: self.UC.stop.set()
-			except: pass
-			try: self.EL.stop.set()
-			except: pass
-			try: self.EP.stop.set()
-			except: pass
-			try: self.TO.stop.set()
-			except: pass
-		
-			print "\n::: TCP server stopped :::\n"
-			self.stop.set()
-
 	def add_client(self, ID, conn, addr):
 		"""
 		Add client to list or edit a currently existing one.
@@ -219,6 +222,7 @@ class TCP_server():
 class Server_timeout(threading.Thread):
 	"""
 	Timer that will stop the server if there is no activity for the specified time.
+	This thread is also in charge of shutting down the server.
 	
 	:param server: The instance of TCP_server that owns the thread.
 	"""
@@ -226,16 +230,22 @@ class Server_timeout(threading.Thread):
 		threading.Thread.__init__(self)
 		self.server = server
 		self.last_reset = 0.
+		self.sleep_time = 0.1
 		self.reset()
-		self.stop = threading.Event()
 	
 	def run(self):
-		while not self.stop.is_set():
-			t = self.get_last_reset()
-			if time.time() > t+self.server.timeout:
-				print "::: No activity for {0}s. Closing server. :::".format(self.server.timeout)
-				self.server.stop_server()
-			time.sleep(1) # Check for timeout once per second
+		"""
+		Check for timeout once per second or respond imediately to a request from another thread.
+		If timeout is None, wait forever.
+		"""
+		while not self.server.shutdown_request.is_set():
+			time.sleep(self.sleep_time)
+			if self.server.timeout is not None:
+				t = self.get_last_reset()
+				if time.time() > t+self.server.timeout: 
+					print "::: No activity for {0}s. Closing server. :::".format(self.server.timeout)
+					break
+		self.server.shutdown()
 		printout("Timeout thread terminated")
 	
 	def reset(self):
@@ -272,7 +282,8 @@ class User_client_handler(threading.Thread):
 		
 			# If socket is invalid, shut down the server.
 			if not self.soc:
-				self.server.stop_server()
+				self.server.shutdown_request.set()
+				# self.server.stop_server()
 				return
 		
 			# Wait for clients to connect
@@ -297,15 +308,19 @@ class User_client_handler(threading.Thread):
 						except ValueError:
 							print "Client {0} attempted to connect, but gave bad ID".format(data)
 					else:
-						break # detect broken connection
+						conn.close()
+						conn = None
+						# break # detect broken connection
 				except socket.timeout:
 					pass
 			
-			# Error with socket detected...
-			self.cleanup() 
-			if self.server.test_mode:
-				self.server.stop_server()
+		# Error with socket detected...
+		# if self.server.test_mode:
+		# 	self.server.shutdown_request.set()
+		# 	self.server.stop_server()
 		
+		# Exit thread
+		self.cleanup() 
 		self.stop.set()
 		printout("User client thread terminated")
 
@@ -332,32 +347,32 @@ class Event_listener(threading.Thread):
 		except: pass
 
 	def run(self):
-		# Main loop to allow connection if not in test_mode
-		while not self.stop.is_set():
-			# Connect to port
-			self.soc = self.server.get_connection(self.server.host, self.server.event_source_port)
+		# Connect to port
+		self.soc = self.server.get_connection(self.server.host, self.server.event_source_port)
 			
-			# If socket is invalid, shut down the server.
-			if not self.soc:
-				self.server.stop_server()
-				return
+		# If socket is invalid, shut down the server.
+		if not self.soc:
+			self.server.shutdown_request.set()
+			return
 
-			# Wait for event source to connect 
-			self.soc.settimeout(1.)
-			self.server.reset_timer()
+		# Wait for event source to connect 
+		self.soc.settimeout(1.)
+		self.server.reset_timer()
+			
+		# Outer loop - allow reconnection if not in test mode
+		while not self.stop.is_set():
+			# Inner loop 1 = wait for event source to connect
 			while not self.stop.is_set():
 				try:
 					self.conn, self.addr = self.soc.accept()
 					self.conn.settimeout(1.)
 					self.server.reset_timer()
+					print 'Event source connected on address:', self.addr
 					break
 				except socket.timeout:
 					pass
-
-			if not self.stop.is_set():
-				print 'Event source connected on address:', self.addr
 		
-			# Start receiving data from event source.
+			# Inner loop 2 - receive data from event source.
 			while not self.stop.is_set():
 				try:
 					data = self.conn.recv(self.server.tcp_buffer_size)
@@ -366,16 +381,18 @@ class Event_listener(threading.Thread):
 						with self.server.event_buffer_lock:
 							self.server.event_buffer += data
 					else:
-						break # detect broken connection
+						self.conn.close()
+						self.conn = None
+						break # Event source has disconnected
 				except socket.timeout:
 					pass
 			
-			# Error with socket detected...
-			self.cleanup() 
 			if self.server.test_mode:
-				self.server.stop_server()
+				self.server.shutdown_request.set()
 				break
 		
+		# Exit thread
+		self.cleanup() 
 		self.stop.set()
 		printout("Event listener thread terminated")
 
@@ -383,6 +400,7 @@ class Event_listener(threading.Thread):
 class Event_parser(threading.Thread):
 	"""
 	Thread to parse event buffer and handle parsed events.
+	This thread sleep for a short period as it's more efficient process groups of messages
 	
 	:param server: The instance of TCP_server that owns the thread.
 	"""
@@ -392,6 +410,7 @@ class Event_parser(threading.Thread):
 		self.queue = []
 		self.next_msg = 1
 		self.max_msg_length = 14 # '000|X|000|000\n'
+		self.sleep_time = 0.01
 		self.stop = threading.Event()
 
 	def run(self):
@@ -410,7 +429,7 @@ class Event_parser(threading.Thread):
 					if seq >= self.next_msg:
 						heapq.heappush(self.queue, (seq,msg))
 				self.flush()
-			time.sleep(0.01)
+			time.sleep(self.sleep_time)
 		printout("Event parser thread terminated")
 
 	def flush(self):
@@ -555,7 +574,7 @@ class Event_parser(threading.Thread):
 
 if __name__ == "__main__":
 	try:
-		s = TCP_server(HOST, EVENT_SOURCE_PORT, USER_CLIENT_PORT, BUFFER_SIZE, timeout=TIMEOUT, test_mode=False)
+		s = TCP_server(HOST, EVENT_SOURCE_PORT, USER_CLIENT_PORT, BUFFER_SIZE, timeout=TIMEOUT, test_mode=True)
 		s.start_server()
 	except ValueError:
 		s.stop_server()

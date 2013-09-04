@@ -1,3 +1,5 @@
+#!/opt/local/bin/python
+
 import unittest
 from server import TCP_server
 from time import time, sleep
@@ -36,18 +38,18 @@ class GeneralTesting(unittest.TestCase):
 		self.s.start_server()
 		command = "time java -server -XX:-UseConcMarkSweepGC -Xmx2G -jar ./follower-maze2/FollowerMaze-assembly-1.0.jar {0} {1} {2} > maze.log".format(SEED,EVENTS,CONCURRENCY)
 		ret = os.system(command)
-		while not self.s.stop.is_set():
-			pass
+		# while not self.s.stop.is_set():
+		# 	pass
 		self.assertEqual(ret, 0)
 	
 	def test_2_timeout(self):
-		# Check timeout is accurate to +/- 1s
+		# Check timeout is accurate to +/- 2s. This will allow time for the threads to close
 		start = time()
 		self.s.start_server()
 		while not self.s.stop.is_set():
 			elapsed = time()-start
 			if elapsed > TIMEOUT*2: break # Just in case the timeout fails
-		self.assertAlmostEqual(elapsed, TIMEOUT, delta=1)
+		self.assertAlmostEqual(elapsed, TIMEOUT, delta=2)
 
 
 # @unittest.skip('skipped')
@@ -76,7 +78,6 @@ class GeneralNetworkConnection(unittest.TestCase):
 			ret = os.system(command)
 			self.assertEqual(ret, 0)
 			self.s.EP.next_msg = 1
-			sleep(10)
 	
 	def test_6a_get_connection(self):
 		# Test bad port number
@@ -269,16 +270,19 @@ class Queue(unittest.TestCase):
 		self.s.stop_server()
 		sleep(2) # Allow time for sockets to be released and threads to terminate
 		self.s = None
-	
+
 	def test_21_queue_overflow_protection(self):
 		# Stuff buffer with artificial data and let the event parser clean it up
 		self.s.EP.start()
 		for n in range(2,2+self.this_maxqueue):
 			self.s.event_buffer += '{0}|X|000|000\n'.format(n)
+			sleep(0.1)
+		sleep(0.1) # Wait for event parser to clean the queue
 		self.assertLessEqual(len(self.s.EP.queue), self.this_maxqueue)
 		self.s.event_buffer += '2|X|000|000\n'
+		sleep(0.1) # Wait for event parser to clean the queue
 		self.assertLessEqual(len(self.s.EP.queue), 0)
-		
+
 	def test_22_lost_messages_ignored(self):
 		# Add message with sequence number less than the due one
 		self.s.EP.start()
