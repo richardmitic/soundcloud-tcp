@@ -421,8 +421,10 @@ class Event_parser(threading.Thread):
 				self.server.reset_timer()
 				# If queue is overflowing, drop messages that haven't arrived and flush.
 				if len(self.queue)+len(msgs) > self.server.maxqueue:
-					self.next_msg = self.queue[0][0]
-					self.flush()
+					try:
+						self.next_msg = self.queue[0][0]
+						self.flush()
+					except: pass
 				# Add new messages to queue if they have not already been dropped by queue overflow protection.
 				for msg in msgs:
 					seq = int(msg.split('|', 1)[0]) 
